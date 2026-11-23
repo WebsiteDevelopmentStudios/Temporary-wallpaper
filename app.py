@@ -17,6 +17,8 @@ import zipfile
 import py7zr
 
 from PIL import Image, ImageOps, ImageFilter
+import cv2
+import numpy as np
 
 APP_NAME = "Temporary Wallpaper"
 APPDATA = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "TemporaryWallpaper"
@@ -198,126 +200,77 @@ def desktop_resolution() -> tuple[int, int]:
     return max(width, 1), max(height, 1)
 
 
-def ensure_ai_upscaler() -> Path:
-    """Download and verify the official Windows Real-ESRGAN executable and x4plus models."""
-    folder = APPDATA / "upscaler"
-    exe = folder / "realesrgan-ncnn-vulkan.exe"
-    models = folder / "models"
-    param_name = "realesrgan-x4plus.param"
-    bin_name = "realesrgan-x4plus.bin"
+def ensure_cpu_upscaler() -> Path:
+    """Download the tiny FSRCNN x2 model; OpenCV runs it on the CPU (no Vulkan/GPU)."""
+    model_dir = APPDATA / "upscaler"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    model = model_dir / "FSRCNN-small_x2.pb"
+    if model.is_file() and model.stat().st_size >= 5000:
+        return model
 
-    def ready():
-        return exe.is_file() and (models / param_name).is_file() and (models / bin_name).is_file()
+    url = "https://raw.githubusercontent.com/Saafke/FSRCNN_Tensorflow/master/models/FSRCNN-small_x2.pb"
+    temporary = model.with_suffix(".pb.download")
+    request = urllib.request.Request(url, headers={"User-Agent": "TemporaryWallpaper"})
+    try:
+        with urllib.request.urlopen(request, timeout=90) as response, temporary.open("wb") as output:
+            shutil.copyfileobj(response, output)
+        if temporary.stat().st_size < 5000:
+            raise RuntimeError("The FSRCNN AI model download was incomplete.")
+        temporary.replace(model)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return model
 
-    if ready():
-        return exe
 
-    folder.mkdir(parents=True, exist_ok=True)
-    api = "https://api.github.com/repos/xinntao/Real-ESRGAN-ncnn-vulkan/releases/latest"
-    req = urllib.request.Request(api, headers={"User-Agent": "TemporaryWallpaper"})
-    with urllib.request.urlopen(req, timeout=30) as response:
-        release = json.loads(response.read().decode("utf-8"))
-    asset = next((x for x in release.get("assets", []) if x.get("name", "").lower().endswith("-windows.zip")), None)
-    if asset is None:
-        raise RuntimeError("Official Real-ESRGAN Windows package was not found.")
-
-    staging = folder / "install-staging"
-    shutil.rmtree(staging, ignore_errors=True)
-    staging.mkdir(parents=True, exist_ok=True)
-    archive = staging / "realesrgan-windows.zip"
-    req = urllib.request.Request(asset["browser_download_url"], headers={"User-Agent": "TemporaryWallpaper"})
-    with urllib.request.urlopen(req, timeout=180) as response, archive.open("wb") as output:
-        shutil.copyfileobj(response, output)
-    if archive.stat().st_size < 100_000:
-        raise RuntimeError("Real-ESRGAN download was incomplete.")
-
-    with zipfile.ZipFile(archive, "r") as bundle:
-        entries = bundle.namelist()
-        bundle.extractall(staging)
-
-    found_exe = next((p for p in staging.rglob("realesrgan-ncnn-vulkan.exe") if p.is_file()), None)
-    param = next((p for p in staging.rglob(param_name) if p.is_file()), None)
-    binary = next((p for p in staging.rglob(bin_name) if p.is_file()), None)
-    if found_exe is None:
-        raise RuntimeError("The downloaded package did not contain realesrgan-ncnn-vulkan.exe.")
-    if param is None or binary is None:
-        models_found = [x for x in entries if x.lower().endswith((".param", ".bin"))]
-        detail = ", ".join(models_found[:15]) if models_found else "The ZIP contains no .param/.bin model files."
-        raise RuntimeError("The Windows upscaler downloaded, but its x4plus AI model was not in the package. Found: " + detail)
-    if param.parent != binary.parent:
-        raise RuntimeError("The x4plus model parameter and weight files are not together.")
-
-    model_stage = staging / "verified-models"
-    shutil.copytree(param.parent, model_stage, dirs_exist_ok=True)
-    exe_stage = staging / "verified-upscaler.exe"
-    shutil.copy2(found_exe, exe_stage)
-
-    shutil.rmtree(models, ignore_errors=True)
-    models.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(model_stage, models, dirs_exist_ok=True)
-    shutil.copy2(exe_stage, exe)
-    shutil.rmtree(staging, ignore_errors=True)
-
-    if not ready():
-        raise RuntimeError("Real-ESRGAN files were downloaded but installation verification failed.")
-    return exe
-
+def cpu_ai_upscale(image: Image.Image) -> Image.Image:
+    """Apply lightweight 2x FSRCNN super-resolution with OpenCV's CPU backend."""
+    model = ensure_cpu_upscaler()
+    rgb = np.asarray(image.convert("RGB"))
+    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    sr = cv2.dnn_superres.DnnSuperResImpl_create()
+    sr.readModel(str(model))
+    sr.setModel("fsrcnn", 2)
+    result = sr.upsample(bgr)
+    return Image.fromarray(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
 
 def apply_image(path: Path) -> None:
     APPDATA.mkdir(parents=True, exist_ok=True)
     converted = APPDATA / "temporary-wallpaper-hd.bmp"
     target_width, target_height = desktop_resolution()
-    upscaled = APPDATA / "temporary-wallpaper-ai-upscaled.png"
 
-    # Real-ESRGAN generates new image detail at 4x resolution. If the PC does
-    # not support the Vulkan runtime, retain a high-quality Lanczos fallback.
     ai_error = None
-    try:
-        upscaler = ensure_ai_upscaler()
-        result = subprocess.run(
-            [str(upscaler), "-i", str(path), "-o", str(upscaled),
-             "-m", str(upscaler.parent / "models"),
-             "-n", "realesrgan-x4plus", "-s", "4", "-f", "png"],
-            capture_output=True, text=True, timeout=900,
-            cwd=str(upscaler.parent),
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        if result.returncode != 0 or not upscaled.is_file():
-            detail = (result.stderr or result.stdout or "Unknown upscaler error").strip()
-            raise RuntimeError(detail[-1200:])
-    except Exception as exc:
-        ai_error = str(exc)
-
-    with Image.open(upscaled if ai_error is None else path) as source:
-        image = ImageOps.exif_transpose(source)
-        if image.mode in ("RGBA", "LA") or "transparency" in image.info:
-            rgba = image.convert("RGBA")
-            background = Image.new("RGBA", rgba.size, (18, 18, 18, 255))
-            image = Image.alpha_composite(background, rgba).convert("RGB")
-        else:
-            image = image.convert("RGB")
+    with Image.open(path) as source:
+        image = ImageOps.exif_transpose(source).convert("RGB")
+        # FSRCNN-small x2 is only about 10 KB and runs on the CPU; no Vulkan,
+        # CUDA, or compatible graphics card is required.
+        try:
+            if image.width < target_width or image.height < target_height:
+                image = cpu_ai_upscale(image)
+        except Exception as exc:
+            ai_error = str(exc)
 
         image = ImageOps.fit(
             image, (target_width, target_height),
             method=Image.Resampling.LANCZOS, centering=(0.5, 0.5)
         )
         if ai_error is not None:
-            image = image.filter(ImageFilter.UnsharpMask(radius=1.5, percent=150, threshold=2))
+            image = image.filter(ImageFilter.UnsharpMask(radius=1.2, percent=110, threshold=3))
         image.save(converted, "BMP")
 
-    # Tell Windows to fill the display with our already-sized bitmap.
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                        r"Control Panel\Desktop", 0, winreg.KEY_SET_VALUE) as key:
+                        r"Control Panel\\Desktop", 0, winreg.KEY_SET_VALUE) as key:
         winreg.SetValueEx(key, "WallpaperStyle", 0, winreg.REG_SZ, "10")
         winreg.SetValueEx(key, "TileWallpaper", 0, winreg.REG_SZ, "0")
     set_wallpaper(str(converted))
     global ai_warning
     ai_warning = (
-        "AI upscaling was unavailable; a standard high-quality resize was used. "
-        "Update your graphics driver for Vulkan support. Details: " + ai_error
+        "CPU AI upscaling could not run; a high-quality resize was used instead. "
+        "Details: " + ai_error
         if ai_error is not None else ""
     )
-
 
 def apply_video(path: Path) -> None:
     mpv = find_mpv() or download_mpv()
@@ -392,9 +345,9 @@ def run_gui() -> None:
             apply_selection(Path(path))
             warning = globals().get("ai_warning", "")
             status.set(
-                "Applied with standard resizing (AI upscaling unavailable)."
+                "Applied with high-quality resizing (CPU AI upscaling unavailable)."
                 if warning else
-                "AI-upscaled and applied. Your original wallpaper will be restored at your next Windows sign-in."
+                "CPU AI-upscaled (2x) and applied. Your original wallpaper will be restored at your next Windows sign-in."
             )
             if warning:
                 messagebox.showwarning(APP_NAME, warning)
