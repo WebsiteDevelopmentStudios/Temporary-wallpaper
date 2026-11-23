@@ -14,7 +14,7 @@ import winreg
 import urllib.request
 import py7zr
 
-from PIL import Image
+from PIL import Image, ImageOps, ImageFilter
 
 APP_NAME = "Temporary Wallpaper"
 APPDATA = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "TemporaryWallpaper"
@@ -185,11 +185,42 @@ def stop_previous_video() -> None:
         subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, check=False)
 
 
+def desktop_resolution() -> tuple[int, int]:
+    # Use the full virtual desktop size so multi-monitor desktops are covered.
+    user32 = ctypes.windll.user32
+    width = user32.GetSystemMetrics( SM_CXVIRTUALSCREEN := 78)
+    height = user32.GetSystemMetrics( SM_CYVIRTUALSCREEN := 79)
+    if width < 1 or height < 1:
+        width = user32.GetSystemMetrics(0)
+        height = user32.GetSystemMetrics(1)
+    return max(width, 1), max(height, 1)
+
+
 def apply_image(path: Path) -> None:
     APPDATA.mkdir(parents=True, exist_ok=True)
-    converted = APPDATA / "temporary-wallpaper.bmp"
-    with Image.open(path) as image:
-        image.convert("RGB").save(converted, "BMP")
+    converted = APPDATA / "temporary-wallpaper-hd.bmp"
+    target_width, target_height = desktop_resolution()
+
+    with Image.open(path) as source:
+        # Apply camera orientation, remove transparency against a solid background,
+        # then resize/crop to the exact desktop canvas using high-quality Lanczos.
+        image = ImageOps.exif_transpose(source)
+        if image.mode in ("RGBA", "LA") or "transparency" in image.info:
+            rgba = image.convert("RGBA")
+            background = Image.new("RGBA", rgba.size, (18, 18, 18, 255))
+            image = Image.alpha_composite(background, rgba).convert("RGB")
+        else:
+            image = image.convert("RGB")
+
+        image = ImageOps.fit(
+            image,
+            (target_width, target_height),
+            method=Image.Resampling.LANCZOS,
+            centering=(0.5, 0.5),
+        )
+        # A light sharpening pass helps counter softness from desktop scaling.
+        image = image.filter(ImageFilter.UnsharpMask(radius=1.2, percent=115, threshold=3))
+        image.save(converted, "BMP")
     set_wallpaper(str(converted))
 
 
