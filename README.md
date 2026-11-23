@@ -9,9 +9,9 @@ The GitHub Actions workflow builds `TemporaryWallpaper.exe` on Windows and uploa
 ## Supported formats
 
 - Images: PNG, JPG, JPEG, BMP, GIF, WEBP, TIFF
-- Videos: MP4, WEBM, MKV, MOV, AVI (requires mpv.exe alongside the application or available on PATH)
+- Videos: MP4, WEBM, MKV, MOV, AVI, WMV, M4V (mpv is downloaded automatically on first launch)
 
-Video wallpaper support uses mpv. The application looks for `mpv.exe` in its own folder and then on PATH. Without mpv, image wallpapers still work.
+Video wallpaper support uses mpv. On first launch, the application downloads the latest 64-bit Windows mpv build from the `zhongfly/mpv-winbuild` GitHub releases and extracts it under `%LOCALAPPDATA%\\TemporaryWallpaper\\mpv`. An internet connection is required for this first-time setup. If the download fails, image wallpapers remain available and the app reports the video setup error.
 
 ## Behavior
 
