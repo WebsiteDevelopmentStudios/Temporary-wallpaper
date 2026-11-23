@@ -1,5 +1,1 @@
-Pillow>=10.0.0
-pyinstaller>=6.0.0
-py7zr>=0.22.0
-opencv-contrib-python-headless>=4.10.0.84
-numpy>=1.26.0
+Pillow>=10.0.0\npyinstaller>=6.0.0\npy7zr>=0.22.0\n
