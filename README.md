@@ -15,15 +15,15 @@ Video wallpaper support uses mpv. On first launch, the application downloads the
 
 ## Advanced non-AI image upscaling
 
-Image wallpapers use a custom local image-processing pipeline. It does not download or run AI models and does not need OpenCV, CUDA, Vulkan, or a compatible graphics card.
+The app uses a custom classical super-resolution pipeline that runs locally on the CPU. It does not download AI models and does not require CUDA, Vulkan, OpenCV, or a supported graphics card.
 
-The pipeline:
-- Upscales in multiple bounded stages using high-quality Lanczos resampling to reduce the softness that can appear in one large resize.
-- Detects edges and applies sharpening selectively around boundaries instead of sharpening every pixel equally.
-- Uses a restrained fine-detail and contrast pass to improve perceived clarity while limiting halos and noise.
-- Fits the processed image to the detected desktop resolution, including multi-monitor virtual desktop dimensions.
+- **Iterative back-projection:** repeatedly compares a simulated downscaled result with the original pixels, then projects the residual back into the enlarged image.
+- **Multi-channel refinement:** processes RGB channels independently to keep memory use manageable.
+- **Edge-aware sharpening:** detects boundaries and applies stronger sharpening there while limiting changes in smooth regions.
+- **Local contrast enhancement:** selectively boosts fine edge contrast after enlargement.
+- **Resolution-aware output:** prepares the image for the detected virtual desktop size before the final cover crop.
 
-This is advanced conventional upscaling, not AI super-resolution: it can improve interpolation and perceived sharpness, but it cannot truthfully recreate details that are absent from a tiny or heavily blurred source image. Everything runs locally on the PC.
+This is a more advanced conventional approach than simply resizing and sharpening, but it cannot recreate real details that are not present in the source. A very small or badly blurred image will still have an upper limit without AI or a higher-resolution original.
 
 ## Behavior
 
