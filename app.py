@@ -199,56 +199,68 @@ def desktop_resolution() -> tuple[int, int]:
 
 
 def ensure_ai_upscaler() -> Path:
-    """Install Real-ESRGAN and locate model files regardless of ZIP layout."""
+    """Download and verify the official Windows Real-ESRGAN executable and x4plus models."""
     folder = APPDATA / "upscaler"
-    executable = folder / "realesrgan-ncnn-vulkan.exe"
-    models_dir = folder / "models"
+    exe = folder / "realesrgan-ncnn-vulkan.exe"
+    models = folder / "models"
     param_name = "realesrgan-x4plus.param"
     bin_name = "realesrgan-x4plus.bin"
 
-    def ready() -> bool:
-        return executable.is_file() and (models_dir / param_name).is_file() and (models_dir / bin_name).is_file()
+    def ready():
+        return exe.is_file() and (models / param_name).is_file() and (models / bin_name).is_file()
 
     if ready():
-        return executable
+        return exe
 
     folder.mkdir(parents=True, exist_ok=True)
     api = "https://api.github.com/repos/xinntao/Real-ESRGAN-ncnn-vulkan/releases/latest"
-    request = urllib.request.Request(api, headers={"User-Agent": "TemporaryWallpaper"})
-    with urllib.request.urlopen(request, timeout=30) as response:
+    req = urllib.request.Request(api, headers={"User-Agent": "TemporaryWallpaper"})
+    with urllib.request.urlopen(req, timeout=30) as response:
         release = json.loads(response.read().decode("utf-8"))
-    asset = next((a for a in release.get("assets", []) if a.get("name", "").lower().endswith("windows.zip")), None)
+    asset = next((x for x in release.get("assets", []) if x.get("name", "").lower().endswith("-windows.zip")), None)
     if asset is None:
-        raise RuntimeError("Could not find the Windows AI upscaler download.")
+        raise RuntimeError("Official Real-ESRGAN Windows package was not found.")
 
-    archive = folder / "realesrgan-windows.zip"
+    staging = folder / "install-staging"
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True, exist_ok=True)
+    archive = staging / "realesrgan-windows.zip"
     req = urllib.request.Request(asset["browser_download_url"], headers={"User-Agent": "TemporaryWallpaper"})
-    with urllib.request.urlopen(req, timeout=120) as response, archive.open("wb") as output:
+    with urllib.request.urlopen(req, timeout=180) as response, archive.open("wb") as output:
         shutil.copyfileobj(response, output)
+    if archive.stat().st_size < 100_000:
+        raise RuntimeError("Real-ESRGAN download was incomplete.")
+
     with zipfile.ZipFile(archive, "r") as bundle:
-        bundle.extractall(folder)
-    try:
-        archive.unlink(missing_ok=True)
-    except OSError:
-        pass
+        entries = bundle.namelist()
+        bundle.extractall(staging)
 
-    found_exe = next(folder.rglob("realesrgan-ncnn-vulkan.exe"), None)
+    found_exe = next((p for p in staging.rglob("realesrgan-ncnn-vulkan.exe") if p.is_file()), None)
+    param = next((p for p in staging.rglob(param_name) if p.is_file()), None)
+    binary = next((p for p in staging.rglob(bin_name) if p.is_file()), None)
     if found_exe is None:
-        raise RuntimeError("The AI upscaler executable was missing from its download.")
-    if found_exe != executable:
-        shutil.copy2(found_exe, executable)
+        raise RuntimeError("The downloaded package did not contain realesrgan-ncnn-vulkan.exe.")
+    if param is None or binary is None:
+        models_found = [x for x in entries if x.lower().endswith((".param", ".bin"))]
+        detail = ", ".join(models_found[:15]) if models_found else "The ZIP contains no .param/.bin model files."
+        raise RuntimeError("The Windows upscaler downloaded, but its x4plus AI model was not in the package. Found: " + detail)
+    if param.parent != binary.parent:
+        raise RuntimeError("The x4plus model parameter and weight files are not together.")
 
-    param_file = next(folder.rglob(param_name), None)
-    bin_file = next(folder.rglob(bin_name), None)
-    if param_file is None or bin_file is None:
-        raise RuntimeError("The download is missing the Real-ESRGAN x4plus .param or .bin model file.")
-    if param_file.parent != bin_file.parent:
-        raise RuntimeError("The Real-ESRGAN x4plus model files were found in different folders.")
-    if param_file.parent != models_dir:
-        shutil.copytree(param_file.parent, models_dir, dirs_exist_ok=True)
+    model_stage = staging / "verified-models"
+    shutil.copytree(param.parent, model_stage, dirs_exist_ok=True)
+    exe_stage = staging / "verified-upscaler.exe"
+    shutil.copy2(found_exe, exe_stage)
+
+    shutil.rmtree(models, ignore_errors=True)
+    models.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(model_stage, models, dirs_exist_ok=True)
+    shutil.copy2(exe_stage, exe)
+    shutil.rmtree(staging, ignore_errors=True)
+
     if not ready():
-        raise RuntimeError("The Real-ESRGAN x4plus model files could not be installed.")
-    return executable
+        raise RuntimeError("Real-ESRGAN files were downloaded but installation verification failed.")
+    return exe
 
 
 def apply_image(path: Path) -> None:
