@@ -199,11 +199,17 @@ def desktop_resolution() -> tuple[int, int]:
 
 
 def ensure_ai_upscaler() -> Path:
-    """Install the portable Real-ESRGAN upscaler for genuine AI super-resolution."""
+    """Install Real-ESRGAN and locate model files regardless of ZIP layout."""
     folder = APPDATA / "upscaler"
     executable = folder / "realesrgan-ncnn-vulkan.exe"
-    model = folder / "models" / "realesrgan-x4plus.param"
-    if executable.is_file() and model.is_file():
+    models_dir = folder / "models"
+    param_name = "realesrgan-x4plus.param"
+    bin_name = "realesrgan-x4plus.bin"
+
+    def ready() -> bool:
+        return executable.is_file() and (models_dir / param_name).is_file() and (models_dir / bin_name).is_file()
+
+    if ready():
         return executable
 
     folder.mkdir(parents=True, exist_ok=True)
@@ -211,14 +217,12 @@ def ensure_ai_upscaler() -> Path:
     request = urllib.request.Request(api, headers={"User-Agent": "TemporaryWallpaper"})
     with urllib.request.urlopen(request, timeout=30) as response:
         release = json.loads(response.read().decode("utf-8"))
-    asset = next((a for a in release.get("assets", [])
-                  if a.get("name", "").endswith("windows.zip")), None)
+    asset = next((a for a in release.get("assets", []) if a.get("name", "").lower().endswith("windows.zip")), None)
     if asset is None:
         raise RuntimeError("Could not find the Windows AI upscaler download.")
 
     archive = folder / "realesrgan-windows.zip"
-    req = urllib.request.Request(asset["browser_download_url"],
-                                 headers={"User-Agent": "TemporaryWallpaper"})
+    req = urllib.request.Request(asset["browser_download_url"], headers={"User-Agent": "TemporaryWallpaper"})
     with urllib.request.urlopen(req, timeout=120) as response, archive.open("wb") as output:
         shutil.copyfileobj(response, output)
     with zipfile.ZipFile(archive, "r") as bundle:
@@ -228,18 +232,22 @@ def ensure_ai_upscaler() -> Path:
     except OSError:
         pass
 
-    found = next(folder.rglob("realesrgan-ncnn-vulkan.exe"), None)
-    if found is None:
+    found_exe = next(folder.rglob("realesrgan-ncnn-vulkan.exe"), None)
+    if found_exe is None:
         raise RuntimeError("The AI upscaler executable was missing from its download.")
-    if found != executable:
-        for item in found.parent.iterdir():
-            destination = folder / item.name
-            if item.is_file():
-                shutil.copy2(item, destination)
-            elif item.is_dir() and item.name.lower() == "models":
-                shutil.copytree(item, destination, dirs_exist_ok=True)
-    if not model.is_file():
-        raise RuntimeError("The Real-ESRGAN x4plus AI model was not installed.")
+    if found_exe != executable:
+        shutil.copy2(found_exe, executable)
+
+    param_file = next(folder.rglob(param_name), None)
+    bin_file = next(folder.rglob(bin_name), None)
+    if param_file is None or bin_file is None:
+        raise RuntimeError("The download is missing the Real-ESRGAN x4plus .param or .bin model file.")
+    if param_file.parent != bin_file.parent:
+        raise RuntimeError("The Real-ESRGAN x4plus model files were found in different folders.")
+    if param_file.parent != models_dir:
+        shutil.copytree(param_file.parent, models_dir, dirs_exist_ok=True)
+    if not ready():
+        raise RuntimeError("The Real-ESRGAN x4plus model files could not be installed.")
     return executable
 
 
@@ -256,6 +264,7 @@ def apply_image(path: Path) -> None:
         upscaler = ensure_ai_upscaler()
         result = subprocess.run(
             [str(upscaler), "-i", str(path), "-o", str(upscaled),
+             "-m", str(upscaler.parent / "models"),
              "-n", "realesrgan-x4plus", "-s", "4", "-f", "png"],
             capture_output=True, text=True, timeout=900,
             cwd=str(upscaler.parent),
