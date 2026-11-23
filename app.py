@@ -200,77 +200,82 @@ def desktop_resolution() -> tuple[int, int]:
     return max(width, 1), max(height, 1)
 
 
-def ensure_cpu_upscaler() -> Path:
-    """Download the tiny FSRCNN x2 model; OpenCV runs it on the CPU (no Vulkan/GPU)."""
-    model_dir = APPDATA / "upscaler"
-    model_dir.mkdir(parents=True, exist_ok=True)
-    model = model_dir / "FSRCNN-small_x2.pb"
-    if model.is_file() and model.stat().st_size >= 5000:
-        return model
+def advanced_upscale(image: Image.Image, target_size: tuple[int, int]) -> Image.Image:
+    """Locally upscale with multi-pass resampling and edge-guided detail enhancement.
 
-    url = "https://raw.githubusercontent.com/Saafke/FSRCNN_Tensorflow/master/models/FSRCNN-small_x2.pb"
-    temporary = model.with_suffix(".pb.download")
-    request = urllib.request.Request(url, headers={"User-Agent": "TemporaryWallpaper"})
-    try:
-        with urllib.request.urlopen(request, timeout=90) as response, temporary.open("wb") as output:
-            shutil.copyfileobj(response, output)
-        if temporary.stat().st_size < 5000:
-            raise RuntimeError("The FSRCNN AI model download was incomplete.")
-        temporary.replace(model)
-    finally:
-        try:
-            temporary.unlink(missing_ok=True)
-        except OSError:
-            pass
-    return model
+    This is deterministic classical image processing: no neural network, model
+    download, GPU, CUDA, or OpenCV is involved.
+    """
+    image = image.convert("RGB")
+    target_width, target_height = target_size
 
+    # Preserve aspect ratio while making enough pixels for the final desktop crop.
+    scale = max(target_width / image.width, target_height / image.height, 1.0)
+    working = image
+    while max(target_width / working.width, target_height / working.height) > 1.01:
+        remaining = max(target_width / working.width, target_height / working.height)
+        step = min(1.8, remaining)
+        next_size = (
+            max(working.width + 1, int(round(working.width * step))),
+            max(working.height + 1, int(round(working.height * step))),
+        )
+        working = working.resize(next_size, Image.Resampling.LANCZOS)
 
-def cpu_ai_upscale(image: Image.Image) -> Image.Image:
-    """Apply lightweight 2x FSRCNN super-resolution with OpenCV's CPU backend."""
-    model = ensure_cpu_upscaler()
-    rgb = np.asarray(image.convert("RGB"))
-    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-    sr = cv2.dnn_superres.DnnSuperResImpl_create()
-    sr.readModel(str(model))
-    sr.setModel("fsrcnn", 2)
-    result = sr.upsample(bgr)
-    return Image.fromarray(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
+    # A final precise resample avoids rounding gaps and supplies the crop stage.
+    fitted_size = (
+        max(target_width, working.width),
+        max(target_height, working.height),
+    )
+    if working.size != fitted_size:
+        working = working.resize(fitted_size, Image.Resampling.LANCZOS)
+
+    # Build an edge mask so sharpening is concentrated around real boundaries,
+    # rather than amplifying smooth gradients and compression noise everywhere.
+    edge_mask = working.convert("L").filter(ImageFilter.FIND_EDGES)
+    edge_mask = edge_mask.point(
+        lambda value: 0 if value < 17 else min(210, int((value - 17) * 3.0))
+    ).filter(ImageFilter.GaussianBlur(radius=0.7))
+
+    # Recover perceived crispness with a restrained high-frequency pass.
+    radius = max(0.9, min(1.7, 0.8 + (scale - 1.0) * 0.22))
+    sharpened = working.filter(
+        ImageFilter.UnsharpMask(radius=radius, percent=135, threshold=4)
+    )
+    working = Image.composite(sharpened, working, edge_mask)
+
+    # Tiny contrast lift helps resized details read clearly without harsh halos.
+    luminance = working.convert("L")
+    local_base = luminance.filter(ImageFilter.GaussianBlur(radius=2.0))
+    fine_edges = luminance.filter(ImageFilter.FIND_EDGES).point(
+        lambda value: 255 if value > 24 else 0
+    ).filter(ImageFilter.GaussianBlur(radius=1.0))
+    detail_mask = ImageChops.lighter(edge_mask, fine_edges)
+    detail_mask = detail_mask.point(lambda value: min(90, int(value * 0.35)))
+    contrast = ImageEnhance.Contrast(working).enhance(1.025)
+    working = Image.composite(contrast, working, detail_mask)
+
+    return working
+
 
 def apply_image(path: Path) -> None:
     APPDATA.mkdir(parents=True, exist_ok=True)
     converted = APPDATA / "temporary-wallpaper-hd.bmp"
     target_width, target_height = desktop_resolution()
 
-    ai_error = None
     with Image.open(path) as source:
         image = ImageOps.exif_transpose(source).convert("RGB")
-        # FSRCNN-small x2 is only about 10 KB and runs on the CPU; no Vulkan,
-        # CUDA, or compatible graphics card is required.
-        try:
-            if image.width < target_width or image.height < target_height:
-                image = cpu_ai_upscale(image)
-        except Exception as exc:
-            ai_error = str(exc)
-
+        image = advanced_upscale(image, (target_width, target_height))
         image = ImageOps.fit(
             image, (target_width, target_height),
             method=Image.Resampling.LANCZOS, centering=(0.5, 0.5)
         )
-        if ai_error is not None:
-            image = image.filter(ImageFilter.UnsharpMask(radius=1.2, percent=110, threshold=3))
         image.save(converted, "BMP")
 
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                        r"Control Panel\Desktop", 0, winreg.KEY_SET_VALUE) as key:
+                        r"Control Panel\\Desktop", 0, winreg.KEY_SET_VALUE) as key:
         winreg.SetValueEx(key, "WallpaperStyle", 0, winreg.REG_SZ, "10")
         winreg.SetValueEx(key, "TileWallpaper", 0, winreg.REG_SZ, "0")
     set_wallpaper(str(converted))
-    global ai_warning
-    ai_warning = (
-        "CPU AI upscaling could not run; a high-quality resize was used instead. "
-        "Details: " + ai_error
-        if ai_error is not None else ""
-    )
 
 def apply_video(path: Path) -> None:
     mpv = find_mpv() or download_mpv()
