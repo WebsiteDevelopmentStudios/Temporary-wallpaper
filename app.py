@@ -12,6 +12,8 @@ from pathlib import Path
 from tkinter import filedialog, messagebox
 import winreg
 import urllib.request
+import tempfile
+import zipfile
 import py7zr
 
 from PIL import Image, ImageOps, ImageFilter
@@ -196,14 +198,74 @@ def desktop_resolution() -> tuple[int, int]:
     return max(width, 1), max(height, 1)
 
 
+def ensure_ai_upscaler() -> Path:
+    """Install the portable Real-ESRGAN upscaler for genuine AI super-resolution."""
+    folder = APPDATA / "upscaler"
+    executable = folder / "realesrgan-ncnn-vulkan.exe"
+    model = folder / "models" / "realesrgan-x4plus.param"
+    if executable.is_file() and model.is_file():
+        return executable
+
+    folder.mkdir(parents=True, exist_ok=True)
+    api = "https://api.github.com/repos/xinntao/Real-ESRGAN-ncnn-vulkan/releases/latest"
+    request = urllib.request.Request(api, headers={"User-Agent": "TemporaryWallpaper"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        release = json.loads(response.read().decode("utf-8"))
+    asset = next((a for a in release.get("assets", [])
+                  if a.get("name", "").endswith("windows.zip")), None)
+    if asset is None:
+        raise RuntimeError("Could not find the Windows AI upscaler download.")
+
+    archive = folder / "realesrgan-windows.zip"
+    req = urllib.request.Request(asset["browser_download_url"],
+                                 headers={"User-Agent": "TemporaryWallpaper"})
+    with urllib.request.urlopen(req, timeout=120) as response, archive.open("wb") as output:
+        shutil.copyfileobj(response, output)
+    with zipfile.ZipFile(archive, "r") as bundle:
+        bundle.extractall(folder)
+    try:
+        archive.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+    found = next(folder.rglob("realesrgan-ncnn-vulkan.exe"), None)
+    if found is None:
+        raise RuntimeError("The AI upscaler executable was missing from its download.")
+    if found != executable:
+        shutil.copy2(found, executable)
+        source_models = found.parent / "models"
+        if source_models.is_dir() and source_models != folder / "models":
+            shutil.copytree(source_models, folder / "models", dirs_exist_ok=True)
+    if not model.is_file():
+        raise RuntimeError("The Real-ESRGAN x4plus AI model was not installed.")
+    return executable
+
+
 def apply_image(path: Path) -> None:
     APPDATA.mkdir(parents=True, exist_ok=True)
     converted = APPDATA / "temporary-wallpaper-hd.bmp"
     target_width, target_height = desktop_resolution()
+    upscaled = APPDATA / "temporary-wallpaper-ai-upscaled.png"
 
-    with Image.open(path) as source:
-        # Apply camera orientation, remove transparency against a solid background,
-        # then resize/crop to the exact desktop canvas using high-quality Lanczos.
+    # Real-ESRGAN generates new image detail at 4x resolution. If the PC does
+    # not support the Vulkan runtime, retain a high-quality Lanczos fallback.
+    ai_error = None
+    try:
+        upscaler = ensure_ai_upscaler()
+        result = subprocess.run(
+            [str(upscaler), "-i", str(path), "-o", str(upscaled),
+             "-n", "realesrgan-x4plus", "-s", "4", "-f", "png"],
+            capture_output=True, text=True, timeout=900,
+            cwd=str(upscaler.parent),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode != 0 or not upscaled.is_file():
+            detail = (result.stderr or result.stdout or "Unknown upscaler error").strip()
+            raise RuntimeError(detail[-1200:])
+    except Exception as exc:
+        ai_error = str(exc)
+
+    with Image.open(upscaled if ai_error is None else path) as source:
         image = ImageOps.exif_transpose(source)
         if image.mode in ("RGBA", "LA") or "transparency" in image.info:
             rgba = image.convert("RGBA")
@@ -213,15 +275,24 @@ def apply_image(path: Path) -> None:
             image = image.convert("RGB")
 
         image = ImageOps.fit(
-            image,
-            (target_width, target_height),
-            method=Image.Resampling.LANCZOS,
-            centering=(0.5, 0.5),
+            image, (target_width, target_height),
+            method=Image.Resampling.LANCZOS, centering=(0.5, 0.5)
         )
-        # A light sharpening pass helps counter softness from desktop scaling.
-        image = image.filter(ImageFilter.UnsharpMask(radius=1.2, percent=115, threshold=3))
+        if ai_error is not None:
+            image = image.filter(ImageFilter.UnsharpMask(radius=1.5, percent=150, threshold=2))
         image.save(converted, "BMP")
+
+    # Tell Windows to fill the display with our already-sized bitmap.
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                        r"Control Panel\\Desktop", 0, winreg.KEY_SET_VALUE) as key:
+        winreg.SetValueEx(key, "WallpaperStyle", 0, winreg.REG_SZ, "10")
+        winreg.SetValueEx(key, "TileWallpaper", 0, winreg.REG_SZ, "0")
     set_wallpaper(str(converted))
+    if ai_error is not None:
+        raise RuntimeError(
+            "AI upscaling could not run on this PC, so a standard resize was used instead. "
+            "Check that your graphics driver supports Vulkan. Details: " + ai_error
+        )
 
 
 def apply_video(path: Path) -> None:
