@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import sys
 import tkinter as tk
 from pathlib import Path
@@ -115,15 +116,23 @@ def download_mpv() -> str:
     if not assets:
         raise RuntimeError("No compatible 64-bit mpv release archive was found.")
     asset = assets[0]
-    archive = install_dir / "mpv-download.7z"
+    # Use a unique temporary archive name so two app launches cannot collide.
+    fd, archive_name = tempfile.mkstemp(prefix="mpv-download-", suffix=".7z", dir=install_dir)
+    os.close(fd)
+    archive = Path(archive_name)
     req = urllib.request.Request(asset["browser_download_url"], headers={"User-Agent": "TemporaryWallpaper"})
-    with urllib.request.urlopen(req, timeout=60) as response, archive.open("wb") as output:
-        shutil.copyfileobj(response, output)
     try:
+        with urllib.request.urlopen(req, timeout=120) as response, archive.open("wb") as output:
+            shutil.copyfileobj(response, output)
+        # Close the 7z reader before attempting to remove the archive (required on Windows).
         with py7zr.SevenZipFile(archive, mode="r") as sevenzip:
             sevenzip.extractall(path=install_dir)
     finally:
-        archive.unlink(missing_ok=True)
+        try:
+            archive.unlink(missing_ok=True)
+        except OSError:
+            # A transient Windows file lock should not turn a successful install into a failure.
+            pass
     exe = next(install_dir.rglob("mpv.exe"), None)
     if exe is None:
         raise RuntimeError("mpv.exe was not found after extracting the download.")
