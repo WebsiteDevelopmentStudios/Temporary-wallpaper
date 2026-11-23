@@ -10,6 +10,8 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox
 import winreg
+import urllib.request
+import py7zr
 
 from PIL import Image
 
@@ -103,12 +105,45 @@ def restore() -> int:
     return 0
 
 
+def download_mpv() -> str:
+    install_dir = APPDATA / "mpv"
+    install_dir.mkdir(parents=True, exist_ok=True)
+    request = urllib.request.Request("https://api.github.com/repos/zhongfly/mpv-winbuild/releases/latest", headers={"User-Agent": "TemporaryWallpaper"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        release = json.loads(response.read().decode("utf-8"))
+    assets = [a for a in release.get("assets", []) if a.get("name", "").lower().endswith(".7z") and "x86_64" in a.get("name", "").lower()]
+    if not assets:
+        raise RuntimeError("No compatible 64-bit mpv release archive was found.")
+    asset = assets[0]
+    archive = install_dir / "mpv-download.7z"
+    req = urllib.request.Request(asset["browser_download_url"], headers={"User-Agent": "TemporaryWallpaper"})
+    with urllib.request.urlopen(req, timeout=60) as response, archive.open("wb") as output:
+        shutil.copyfileobj(response, output)
+    try:
+        with py7zr.SevenZipFile(archive, mode="r") as sevenzip:
+            sevenzip.extractall(path=install_dir)
+    finally:
+        archive.unlink(missing_ok=True)
+    exe = next(install_dir.rglob("mpv.exe"), None)
+    if exe is None:
+        raise RuntimeError("mpv.exe was not found after extracting the download.")
+    target = install_dir / "mpv.exe"
+    if exe != target:
+        shutil.copy2(exe, target)
+        for item in exe.parent.iterdir():
+            if item.is_file() and item.name.lower() != "mpv.exe":
+                shutil.copy2(item, install_dir / item.name)
+    return str(target)
+
 def find_mpv() -> str | None:
     locations = [Path(sys.executable).resolve().parent, Path(__file__).resolve().parent]
     for folder in locations:
         candidate = folder / "mpv.exe"
         if candidate.is_file():
             return str(candidate)
+    installed = APPDATA / "mpv" / "mpv.exe"
+    if installed.is_file():
+        return str(installed)
     return shutil.which("mpv.exe") or shutil.which("mpv")
 
 
@@ -150,11 +185,7 @@ def apply_image(path: Path) -> None:
 
 
 def apply_video(path: Path) -> None:
-    mpv = find_mpv()
-    if not mpv:
-        raise RuntimeError(
-            "Video playback needs mpv.exe. Put mpv.exe in the same folder as TemporaryWallpaper.exe."
-        )
+    mpv = find_mpv() or download_mpv()
     worker = find_desktop_worker()
     if not worker:
         raise RuntimeError("Could not locate the Windows desktop surface for video playback.")
@@ -204,7 +235,7 @@ def run_gui() -> None:
     state = load_state()
     remembered = state.get("last_selected", "")
     selected = tk.StringVar(value=remembered or "No file selected")
-    status = tk.StringVar(value="Choose an image or video for your temporary wallpaper.")
+    status = tk.StringVar(value=globals().get("mpv_status", "Choose an image or video for your temporary wallpaper."))
 
     tk.Label(root, text="Temporary Wallpaper", font=("Segoe UI", 19, "bold"),
              fg="#f5f5f5", bg="#171923").pack(pady=(20, 5))
@@ -244,4 +275,9 @@ if __name__ == "__main__":
         raise SystemExit("Temporary Wallpaper only runs on Windows.")
     if "--restore" in sys.argv:
         raise SystemExit(restore())
+    try:
+        ensure_status = "Video support is ready." if (find_mpv() or download_mpv()) else "Video support unavailable."
+    except Exception as exc:
+        ensure_status = f"Video support download failed: {exc}"
+    mpv_status = ensure_status
     run_gui()
