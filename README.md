@@ -13,9 +13,17 @@ The GitHub Actions workflow builds `TemporaryWallpaper.exe` on Windows and uploa
 
 Video wallpaper support uses mpv. On first launch, the application downloads the latest 64-bit Windows mpv build from the `zhongfly/mpv-winbuild` GitHub releases and extracts it under `%LOCALAPPDATA%\\TemporaryWallpaper\\mpv`. An internet connection is required for this first-time setup. If the download fails, image wallpapers remain available and the app reports the video setup error.
 
-## AI image enhancement
+## Advanced non-AI image upscaling
 
-For images smaller than the desktop resolution, the app automatically downloads the lightweight FSRCNN-small x2 model (about 10 KB) and runs it through OpenCV on the CPU. It does not require Vulkan, CUDA, or a supported GPU. CPU processing can take longer on older computers. If model download or processing fails, the app falls back to high-quality Lanczos resizing and displays a warning.
+Image wallpapers use a custom local image-processing pipeline. It does not download or run AI models and does not need OpenCV, CUDA, Vulkan, or a compatible graphics card.
+
+The pipeline:
+- Upscales in multiple bounded stages using high-quality Lanczos resampling to reduce the softness that can appear in one large resize.
+- Detects edges and applies sharpening selectively around boundaries instead of sharpening every pixel equally.
+- Uses a restrained fine-detail and contrast pass to improve perceived clarity while limiting halos and noise.
+- Fits the processed image to the detected desktop resolution, including multi-monitor virtual desktop dimensions.
+
+This is advanced conventional upscaling, not AI super-resolution: it can improve interpolation and perceived sharpness, but it cannot truthfully recreate details that are absent from a tiny or heavily blurred source image. Everything runs locally on the PC.
 
 ## Behavior
 
