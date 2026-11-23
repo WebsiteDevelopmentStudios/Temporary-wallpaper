@@ -12,13 +12,10 @@ from pathlib import Path
 from tkinter import filedialog, messagebox
 import winreg
 import urllib.request
-import tempfile
 import zipfile
 import py7zr
 
-from PIL import Image, ImageOps, ImageFilter
-import cv2
-import numpy as np
+from PIL import Image, ImageOps, ImageFilter, ImageChops, ImageEnhance
 
 APP_NAME = "Temporary Wallpaper"
 APPDATA = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "TemporaryWallpaper"
@@ -245,7 +242,6 @@ def advanced_upscale(image: Image.Image, target_size: tuple[int, int]) -> Image.
 
     # Tiny contrast lift helps resized details read clearly without harsh halos.
     luminance = working.convert("L")
-    local_base = luminance.filter(ImageFilter.GaussianBlur(radius=2.0))
     fine_edges = luminance.filter(ImageFilter.FIND_EDGES).point(
         lambda value: 255 if value > 24 else 0
     ).filter(ImageFilter.GaussianBlur(radius=1.0))
@@ -348,14 +344,7 @@ def run_gui() -> None:
         selected.set(path)
         try:
             apply_selection(Path(path))
-            warning = globals().get("ai_warning", "")
-            status.set(
-                "Applied with high-quality resizing (CPU AI upscaling unavailable)."
-                if warning else
-                "CPU AI-upscaled (2x) and applied. Your original wallpaper will be restored at your next Windows sign-in."
-            )
-            if warning:
-                messagebox.showwarning(APP_NAME, warning)
+            status.set("Advanced non-AI upscaling applied. Your original wallpaper will be restored at your next Windows sign-in.")
         except Exception as exc:
             status.set("Could not apply the selected file.")
             messagebox.showerror(APP_NAME, str(exc))
