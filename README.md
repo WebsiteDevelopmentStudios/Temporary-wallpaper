@@ -13,17 +13,17 @@ The GitHub Actions workflow builds `TemporaryWallpaper.exe` on Windows and uploa
 
 Video wallpaper support uses mpv. On first launch, the application downloads the latest 64-bit Windows mpv build from the `zhongfly/mpv-winbuild` GitHub releases and extracts it under `%LOCALAPPDATA%\\TemporaryWallpaper\\mpv`. An internet connection is required for this first-time setup. If the download fails, image wallpapers remain available and the app reports the video setup error.
 
-## Advanced non-AI image upscaling
+## Advanced non-AI image enhancement
 
-The app uses a custom classical super-resolution pipeline that runs locally on the CPU. It does not download AI models and does not require CUDA, Vulkan, OpenCV, or a supported graphics card.
+The app uses a classical image-processing pipeline that runs locally on the CPU. It does not download AI models and does not require CUDA, Vulkan, OpenCV, or a supported graphics card.
 
-- **Iterative back-projection:** repeatedly compares a simulated downscaled result with the original pixels, then projects the residual back into the enlarged image.
-- **Multi-channel refinement:** processes RGB channels independently to keep memory use manageable.
-- **Edge-aware sharpening:** detects boundaries and applies stronger sharpening there while limiting changes in smooth regions.
-- **Local contrast enhancement:** selectively boosts fine edge contrast after enlargement.
-- **Resolution-aware output:** prepares the image for the detected virtual desktop size before the final cover crop.
+- **Luminance deblurring:** applies a conservative Richardson-Lucy-style deconvolution pass to brightness detail before enlargement.
+- **Color-safe processing:** performs detail recovery on luminance, then enlarges the color channels separately to reduce colored halos.
+- **High-quality resampling:** uses Lanczos interpolation to scale the image to the detected virtual desktop resolution.
+- **Edge-gated sharpening:** strengthens visible boundaries while avoiding aggressive sharpening of flat areas and gradients.
+- **Resolution-aware output:** prepares the image for the full virtual desktop before the final cover crop.
 
-This is a more advanced conventional approach than simply resizing and sharpening, but it cannot recreate real details that are not present in the source. A very small or badly blurred image will still have an upper limit without AI or a higher-resolution original.
+This is conventional, non-AI enhancement. It can make existing edges look clearer, but it cannot recover photographic details that were never captured. A tiny, heavily compressed, or badly blurred source will still have a limit; the best result comes from starting with the highest-quality original available.
 
 ## Behavior
 
