@@ -13,6 +13,10 @@ The GitHub Actions workflow builds `TemporaryWallpaper.exe` on Windows and uploa
 
 Video wallpaper support uses mpv. On first launch, the application downloads the latest 64-bit Windows mpv build from the `zhongfly/mpv-winbuild` GitHub releases and extracts it under `%LOCALAPPDATA%\\TemporaryWallpaper\\mpv`. An internet connection is required for this first-time setup. If the download fails, image wallpapers remain available and the app reports the video setup error.
 
+## AI image enhancement
+
+For images smaller than the desktop resolution, the app automatically downloads the lightweight FSRCNN-small x2 model (about 10 KB) and runs it through OpenCV on the CPU. It does not require Vulkan, CUDA, or a supported GPU. CPU processing can take longer on older computers. If model download or processing fails, the app falls back to high-quality Lanczos resizing and displays a warning.
+
 ## Behavior
 
 - The last selected path is saved in the current user's Local AppData.
