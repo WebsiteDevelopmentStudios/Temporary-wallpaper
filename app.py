@@ -15,7 +15,8 @@ import urllib.request
 import zipfile
 import py7zr
 
-from PIL import Image, ImageOps, ImageFilter, ImageChops, ImageEnhance
+from PIL import Image, ImageOps, ImageFilter, ImageEnhance
+import numpy as np
 
 APP_NAME = "Temporary Wallpaper"
 APPDATA = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "TemporaryWallpaper"
@@ -197,59 +198,78 @@ def desktop_resolution() -> tuple[int, int]:
     return max(width, 1), max(height, 1)
 
 
-def advanced_upscale(image: Image.Image, target_size: tuple[int, int]) -> Image.Image:
-    """Locally upscale with multi-pass resampling and edge-guided detail enhancement.
+def _iterative_back_projection(channel: Image.Image, work_size: tuple[int, int],
+                                iterations: int = 5) -> Image.Image:
+    """Classical single-channel super-resolution refinement (no trained model).
 
-    This is deterministic classical image processing: no neural network, model
-    download, GPU, CUDA, or OpenCV is involved.
+    Each pass checks how the enlarged result would look when reduced to the
+    original size, then projects the measured residual back into the enlarged
+    image. This improves consistency and edge definition, but does not invent
+    genuinely unknown source detail.
     """
+    source = np.asarray(channel.convert("L"), dtype=np.float32)
+    working = channel.convert("F").resize(work_size, Image.Resampling.LANCZOS)
+
+    for _ in range(iterations):
+        # Simulate the softness introduced when a high-resolution image is
+        # reduced to the source dimensions.
+        softened = working.filter(ImageFilter.GaussianBlur(radius=0.45))
+        reduced = softened.resize(channel.size, Image.Resampling.BICUBIC)
+        residual = source - np.asarray(reduced, dtype=np.float32)
+
+        residual_image = Image.fromarray(residual.astype(np.float32), mode="F")
+        correction = residual_image.resize(work_size, Image.Resampling.BICUBIC)
+        refined = np.asarray(working, dtype=np.float32) + (
+            np.asarray(correction, dtype=np.float32) * 0.62
+        )
+        working = Image.fromarray(np.clip(refined, 0, 255).astype(np.float32), mode="F")
+
+    return working.convert("L")
+
+
+def advanced_upscale(image: Image.Image, target_size: tuple[int, int]) -> Image.Image:
+    """Edge-aware, iterative classical upscaling using only local CPU processing."""
     image = image.convert("RGB")
     target_width, target_height = target_size
-
-    # Preserve aspect ratio while making enough pixels for the final desktop crop.
     scale = max(target_width / image.width, target_height / image.height, 1.0)
-    working = image
-    while max(target_width / working.width, target_height / working.height) > 1.01:
-        remaining = max(target_width / working.width, target_height / working.height)
-        step = min(1.8, remaining)
-        next_size = (
-            max(working.width + 1, int(round(working.width * step))),
-            max(working.height + 1, int(round(working.height * step))),
-        )
-        working = working.resize(next_size, Image.Resampling.LANCZOS)
 
-    # A final precise resample avoids rounding gaps and supplies the crop stage.
-    fitted_size = (
-        max(target_width, working.width),
-        max(target_height, working.height),
-    )
-    if working.size != fitted_size:
-        working = working.resize(fitted_size, Image.Resampling.LANCZOS)
+    # Avoid a single enormous interpolation jump. Keep the source aspect ratio
+    # and create enough pixels for the final cover crop.
+    work_width = max(target_width, int(round(image.width * scale)))
+    work_height = max(target_height, int(round(image.height * scale)))
+    work_size = (work_width, work_height)
 
-    # Build an edge mask so sharpening is concentrated around real boundaries,
-    # rather than amplifying smooth gradients and compression noise everywhere.
-    edge_mask = working.convert("L").filter(ImageFilter.FIND_EDGES)
-    edge_mask = edge_mask.point(
-        lambda value: 0 if value < 17 else min(210, int((value - 17) * 3.0))
-    ).filter(ImageFilter.GaussianBlur(radius=0.7))
+    if scale > 1.02:
+        # Refine each color channel independently to keep peak memory manageable.
+        refined_channels = [
+            _iterative_back_projection(image.getchannel(channel), work_size)
+            for channel in range(3)
+        ]
+        working = Image.merge("RGB", refined_channels)
+    else:
+        working = image.resize(work_size, Image.Resampling.LANCZOS)
 
-    # Recover perceived crispness with a restrained high-frequency pass.
-    radius = max(0.9, min(1.7, 0.8 + (scale - 1.0) * 0.22))
+    # Edge-aware detail pass: sharpen boundaries much more than flat areas.
+    luminance = working.convert("L")
+    edges = luminance.filter(ImageFilter.FIND_EDGES)
+    edge_mask = edges.point(
+        lambda value: 0 if value < 12 else min(255, (value - 12) * 4)
+    ).filter(ImageFilter.GaussianBlur(radius=0.8))
+
     sharpened = working.filter(
-        ImageFilter.UnsharpMask(radius=radius, percent=135, threshold=4)
+        ImageFilter.UnsharpMask(radius=max(0.8, min(1.5, scale * 0.55)),
+                                percent=175, threshold=3)
     )
     working = Image.composite(sharpened, working, edge_mask)
 
-    # Tiny contrast lift helps resized details read clearly without harsh halos.
-    luminance = working.convert("L")
-    fine_edges = luminance.filter(ImageFilter.FIND_EDGES).point(
-        lambda value: 255 if value > 24 else 0
+    # Recover restrained local contrast after interpolation without applying
+    # global sharpening to smooth skies, gradients, or skin tones.
+    local_detail = working.convert("L").filter(ImageFilter.FIND_EDGES)
+    detail_mask = local_detail.point(
+        lambda value: 0 if value < 20 else min(110, (value - 20) * 2)
     ).filter(ImageFilter.GaussianBlur(radius=1.0))
-    detail_mask = ImageChops.lighter(edge_mask, fine_edges)
-    detail_mask = detail_mask.point(lambda value: min(90, int(value * 0.35)))
-    contrast = ImageEnhance.Contrast(working).enhance(1.025)
-    working = Image.composite(contrast, working, detail_mask)
-
+    enhanced = ImageEnhance.Contrast(working).enhance(1.04)
+    working = Image.composite(enhanced, working, detail_mask)
     return working
 
 
