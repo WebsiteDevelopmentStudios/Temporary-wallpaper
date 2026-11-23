@@ -232,10 +232,12 @@ def ensure_ai_upscaler() -> Path:
     if found is None:
         raise RuntimeError("The AI upscaler executable was missing from its download.")
     if found != executable:
-        shutil.copy2(found, executable)
-        source_models = found.parent / "models"
-        if source_models.is_dir() and source_models != folder / "models":
-            shutil.copytree(source_models, folder / "models", dirs_exist_ok=True)
+        for item in found.parent.iterdir():
+            destination = folder / item.name
+            if item.is_file():
+                shutil.copy2(item, destination)
+            elif item.is_dir() and item.name.lower() == "models":
+                shutil.copytree(item, destination, dirs_exist_ok=True)
     if not model.is_file():
         raise RuntimeError("The Real-ESRGAN x4plus AI model was not installed.")
     return executable
@@ -288,11 +290,12 @@ def apply_image(path: Path) -> None:
         winreg.SetValueEx(key, "WallpaperStyle", 0, winreg.REG_SZ, "10")
         winreg.SetValueEx(key, "TileWallpaper", 0, winreg.REG_SZ, "0")
     set_wallpaper(str(converted))
-    if ai_error is not None:
-        raise RuntimeError(
-            "AI upscaling could not run on this PC, so a standard resize was used instead. "
-            "Check that your graphics driver supports Vulkan. Details: " + ai_error
-        )
+    global ai_warning
+    ai_warning = (
+        "AI upscaling was unavailable; a standard high-quality resize was used. "
+        "Update your graphics driver for Vulkan support. Details: " + ai_error
+        if ai_error is not None else ""
+    )
 
 
 def apply_video(path: Path) -> None:
@@ -366,7 +369,14 @@ def run_gui() -> None:
         selected.set(path)
         try:
             apply_selection(Path(path))
-            status.set("Applied. Your original wallpaper will be restored at your next Windows sign-in.")
+            warning = globals().get("ai_warning", "")
+            status.set(
+                "Applied with standard resizing (AI upscaling unavailable)."
+                if warning else
+                "AI-upscaled and applied. Your original wallpaper will be restored at your next Windows sign-in."
+            )
+            if warning:
+                messagebox.showwarning(APP_NAME, warning)
         except Exception as exc:
             status.set("Could not apply the selected file.")
             messagebox.showerror(APP_NAME, str(exc))
