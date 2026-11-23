@@ -111,7 +111,7 @@ def download_mpv() -> str:
     request = urllib.request.Request("https://api.github.com/repos/zhongfly/mpv-winbuild/releases/latest", headers={"User-Agent": "TemporaryWallpaper"})
     with urllib.request.urlopen(request, timeout=30) as response:
         release = json.loads(response.read().decode("utf-8"))
-    assets = [a for a in release.get("assets", []) if a.get("name", "").lower().endswith(".7z") and "x86_64" in a.get("name", "").lower()]
+    assets = [a for a in release.get("assets", []) if a.get("name", "").lower().startswith("mpv-x86_64-") and a.get("name", "").lower().endswith(".7z")]
     if not assets:
         raise RuntimeError("No compatible 64-bit mpv release archive was found.")
     asset = assets[0]
