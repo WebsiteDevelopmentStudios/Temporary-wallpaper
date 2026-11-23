@@ -188,8 +188,8 @@ def stop_previous_video() -> None:
 def desktop_resolution() -> tuple[int, int]:
     # Use the full virtual desktop size so multi-monitor desktops are covered.
     user32 = ctypes.windll.user32
-    width = user32.GetSystemMetrics( SM_CXVIRTUALSCREEN := 78)
-    height = user32.GetSystemMetrics( SM_CYVIRTUALSCREEN := 79)
+    width = user32.GetSystemMetrics(78)
+    height = user32.GetSystemMetrics(79)
     if width < 1 or height < 1:
         width = user32.GetSystemMetrics(0)
         height = user32.GetSystemMetrics(1)
