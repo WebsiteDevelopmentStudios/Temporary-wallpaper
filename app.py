@@ -286,7 +286,7 @@ def apply_image(path: Path) -> None:
 
     # Tell Windows to fill the display with our already-sized bitmap.
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                        r"Control Panel\\Desktop", 0, winreg.KEY_SET_VALUE) as key:
+                        r"Control Panel\Desktop", 0, winreg.KEY_SET_VALUE) as key:
         winreg.SetValueEx(key, "WallpaperStyle", 0, winreg.REG_SZ, "10")
         winreg.SetValueEx(key, "TileWallpaper", 0, winreg.REG_SZ, "0")
     set_wallpaper(str(converted))
