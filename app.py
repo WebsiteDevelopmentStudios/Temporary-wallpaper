@@ -198,80 +198,70 @@ def desktop_resolution() -> tuple[int, int]:
     return max(width, 1), max(height, 1)
 
 
-def _iterative_back_projection(channel: Image.Image, work_size: tuple[int, int],
-                                iterations: int = 5) -> Image.Image:
-    """Classical single-channel super-resolution refinement (no trained model).
+def _classical_deblur_luminance(channel: Image.Image, iterations: int = 6) -> Image.Image:
+    """Mild Richardson-Lucy deconvolution of luminance; no trained model or GPU."""
+    source = channel.convert("L")
+    observed = np.asarray(source, dtype=np.float32)
+    estimate = np.maximum(observed, 1.0)
 
-    Each pass checks how the enlarged result would look when reduced to the
-    original size, then projects the measured residual back into the enlarged
-    image. This improves consistency and edge definition, but does not invent
-    genuinely unknown source detail.
-    """
-    source = np.asarray(channel.convert("L"), dtype=np.float32)
-    working = channel.convert("F").resize(work_size, Image.Resampling.LANCZOS)
-
+    # A small, symmetric Gaussian point-spread approximation. Keeping the
+    # correction conservative helps avoid ringing around high-contrast edges.
     for _ in range(iterations):
-        # Simulate the softness introduced when a high-resolution image is
-        # reduced to the source dimensions.
-        softened = working.convert("L").filter(ImageFilter.GaussianBlur(radius=0.45)).convert("F")
-        reduced = softened.resize(channel.size, Image.Resampling.BICUBIC)
-        residual = source - np.asarray(reduced, dtype=np.float32)
-
-        residual_image = Image.fromarray(residual.astype(np.float32), mode="F")
-        correction = residual_image.resize(work_size, Image.Resampling.BICUBIC)
-        refined = np.asarray(working, dtype=np.float32) + (
-            np.asarray(correction, dtype=np.float32) * 0.62
+        estimate_image = Image.fromarray(np.clip(estimate, 0, 255).astype(np.uint8), mode="L")
+        blurred = np.asarray(
+            estimate_image.filter(ImageFilter.GaussianBlur(radius=0.65)),
+            dtype=np.float32
         )
-        working = Image.fromarray(np.clip(refined, 0, 255).astype(np.float32), mode="F")
+        ratio = observed / np.maximum(blurred, 1.0)
+        ratio_image = Image.fromarray(np.clip(ratio, 0, 4.0) * 63.75).convert("L")
+        correction = np.asarray(
+            ratio_image.filter(ImageFilter.GaussianBlur(radius=0.65)),
+            dtype=np.float32
+        ) / 63.75
+        estimate *= np.power(np.maximum(correction, 0.05), 0.55)
+        estimate = np.clip(estimate, 0, 255)
 
-    return working.convert("L")
+    # Blend conservatively with the original to limit noise amplification.
+    restored = np.asarray(source, dtype=np.float32) * 0.35 + estimate * 0.65
+    return Image.fromarray(np.clip(restored, 0, 255).astype(np.uint8), mode="L")
 
 
 def advanced_upscale(image: Image.Image, target_size: tuple[int, int]) -> Image.Image:
-    """Edge-aware, iterative classical upscaling using only local CPU processing."""
+    """Classical luminance deblurring + high-quality resampling; CPU-only and non-AI."""
     image = image.convert("RGB")
     target_width, target_height = target_size
     scale = max(target_width / image.width, target_height / image.height, 1.0)
 
-    # Avoid a single enormous interpolation jump. Keep the source aspect ratio
-    # and create enough pixels for the final cover crop.
+    # Work in YCbCr so detail recovery affects brightness/edges without
+    # creating colored halos around objects.
+    y, cb, cr = image.convert("YCbCr").split()
+    if scale > 1.02:
+        y = _classical_deblur_luminance(y)
+
     work_width = max(target_width, int(round(image.width * scale)))
     work_height = max(target_height, int(round(image.height * scale)))
     work_size = (work_width, work_height)
 
+    y_up = y.resize(work_size, Image.Resampling.LANCZOS)
+    cb_up = cb.resize(work_size, Image.Resampling.LANCZOS)
+    cr_up = cr.resize(work_size, Image.Resampling.LANCZOS)
+
+    # Sharpen only luminance, with a threshold that avoids amplifying tiny
+    # pixel-level noise in skies, gradients, and other flat regions.
     if scale > 1.02:
-        # Refine each color channel independently to keep peak memory manageable.
-        refined_channels = [
-            _iterative_back_projection(image.getchannel(channel), work_size)
-            for channel in range(3)
-        ]
-        working = Image.merge("RGB", refined_channels)
-    else:
-        working = image.resize(work_size, Image.Resampling.LANCZOS)
+        y_sharp = y_up.filter(
+            ImageFilter.UnsharpMask(
+                radius=max(1.0, min(2.0, scale * 0.65)),
+                percent=145,
+                threshold=5
+            )
+        )
+        edge_mask = y_up.filter(ImageFilter.FIND_EDGES).point(
+            lambda value: 0 if value < 14 else min(210, (value - 14) * 3)
+        ).filter(ImageFilter.GaussianBlur(radius=1.0))
+        y_up = Image.composite(y_sharp, y_up, edge_mask)
 
-    # Edge-aware detail pass: sharpen boundaries much more than flat areas.
-    luminance = working.convert("L")
-    edges = luminance.filter(ImageFilter.FIND_EDGES)
-    edge_mask = edges.point(
-        lambda value: 0 if value < 12 else min(255, (value - 12) * 4)
-    ).filter(ImageFilter.GaussianBlur(radius=0.8))
-
-    sharpened = working.filter(
-        ImageFilter.UnsharpMask(radius=max(0.8, min(1.5, scale * 0.55)),
-                                percent=175, threshold=3)
-    )
-    working = Image.composite(sharpened, working, edge_mask)
-
-    # Recover restrained local contrast after interpolation without applying
-    # global sharpening to smooth skies, gradients, or skin tones.
-    local_detail = working.convert("L").filter(ImageFilter.FIND_EDGES)
-    detail_mask = local_detail.point(
-        lambda value: 0 if value < 20 else min(110, (value - 20) * 2)
-    ).filter(ImageFilter.GaussianBlur(radius=1.0))
-    enhanced = ImageEnhance.Contrast(working).enhance(1.04)
-    working = Image.composite(enhanced, working, detail_mask)
-    return working
-
+    return Image.merge("YCbCr", (y_up, cb_up, cr_up)).convert("RGB")
 
 def apply_image(path: Path) -> None:
     APPDATA.mkdir(parents=True, exist_ok=True)
