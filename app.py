@@ -73,12 +73,18 @@ def backup_original() -> tuple[str, str]:
     backup = ""
     source = Path(original) if original else None
     if source and source.is_file():
-        backup_path = downloads / f"Original-Wallpaper-Backup{source.suffix or '.img'}"
+        backup_path = downloads / "Original-Wallpaper-Backup.bmp"
         try:
-            shutil.copy2(source, backup_path)
+            with Image.open(source) as image:
+                image.convert("RGB").save(backup_path, "BMP")
             backup = str(backup_path)
-        except OSError:
-            pass
+        except Exception:
+            try:
+                backup_path = downloads / f"Original-Wallpaper-Backup{source.suffix or '.bak'}"
+                shutil.copy2(source, backup_path)
+                backup = str(backup_path)
+            except OSError:
+                pass
     return original, backup
 
 
