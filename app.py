@@ -213,7 +213,7 @@ def _iterative_back_projection(channel: Image.Image, work_size: tuple[int, int],
     for _ in range(iterations):
         # Simulate the softness introduced when a high-resolution image is
         # reduced to the source dimensions.
-        softened = working.filter(ImageFilter.GaussianBlur(radius=0.45))
+        softened = working.convert("L").filter(ImageFilter.GaussianBlur(radius=0.45)).convert("F")
         reduced = softened.resize(channel.size, Image.Resampling.BICUBIC)
         residual = source - np.asarray(reduced, dtype=np.float32)
 
